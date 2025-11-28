@@ -2,7 +2,7 @@ import argparse
 import betfairlightweight
 import datetime
 import json
-
+import tempfile
 def get_cleared_orders(username, application, session_token):
     trading = betfairlightweight.APIClient(
         username=username,
@@ -12,13 +12,13 @@ def get_cleared_orders(username, application, session_token):
 
     try:
         trading.set_session_token(session_token)
-        print(f"✅ Client initialized with session token for user: {username}")
+        print(f"Client initialized with session token for user: {username}")
 
         _from = datetime.datetime(2025, 11, 20, 12, 0)
         _to = _from + datetime.timedelta(hours=2)
 
-        # 4. Call the listClearedOrders method
-        print("⏳ Requesting cleared orders...")
+        print(f"Requesting cleared orders from {_from:%Y_%m-%dT%H:%M} to {_to:%Y_%m-%dT%H:%M}")
+
         cleared_orders = trading.betting.list_cleared_orders(
             bet_status="SETTLED",
             settled_date_range={
@@ -29,18 +29,16 @@ def get_cleared_orders(username, application, session_token):
             record_count=100,
         )
 
-        print(f"🎉 Found {len(cleared_orders.orders)} cleared orders.")
+        print(f"Found {len(cleared_orders.orders)} cleared orders.")
 
-        for i, order in enumerate(cleared_orders.orders[:5]):
-            print(f"Order {i+1}")
-            print(f"Bet Id: {order.bet_id}")
+        with tempfile.NamedTemporaryFile(mode='w+t', delete=False, prefix="betfair-") as handle:
+            print(f"Writing temporary file: {handle.name}")
+            json.dump(cleared_orders._data, handle)
 
     except Exception as exception:
-        print(f"❌ An error occurred: {exception}")
+        print(f"An error occurred: {exception}")
 
     finally:
-        # Note: No need to explicitly logout when using a session token,
-        # as the token was provided externally.
         pass
 
 
