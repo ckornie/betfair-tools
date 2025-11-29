@@ -49,6 +49,9 @@ def cleared_orders(
             except Exception as exception:
                 logger.warning(f"An error occurred: {exception}")
                 _errors = _errors + 1
+
+        logger.info(f"Recieved {_record} orders")
+
         _to = _from
         days = days - 1
 
