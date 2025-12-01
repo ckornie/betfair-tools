@@ -4,7 +4,7 @@ import datetime
 import logging
 import traceback
 import sys
-from typing import Final
+from typing import Final, Callable
 import json
 import betfairlightweight
 
@@ -12,9 +12,25 @@ logger: Final[logging.Logger] = logging.getLogger(__name__)
 count: Final[int] = 1000
 
 
-def cleared_orders(
+def create_client(
+        username: str,
+        application: str,
+        token: str,
+):
+    client = betfairlightweight.APIClient(
+        username=username,
+        password="placeholder",
+        app_key=application,
+    )
+
+    client.set_session_token(token)
+    logger.info(f"Client initialized with session token for user: {username}")
+    return client
+
+
+def paged_request(
         days: int,
-        client: betfairlightweight.Betting,
+        method,
 ):
     _yesterday = datetime.datetime.now() - datetime.timedelta(days=2)
     _to = datetime.datetime.combine(_yesterday.date(), datetime.time.min)
@@ -29,12 +45,11 @@ def cleared_orders(
 
         while _ongoing and _errors < 5:
             try:
-                response = client.list_cleared_orders(
-                    settled_date_range={
+                response = method(
+                    date_range={
                         'from': _from.strftime("%Y-%m-%dT%H:%M:%SZ"),
                         'to': _to.strftime("%Y-%m-%dT%H:%M:%SZ")
                     },
-                    include_item_description=True,
                     from_record=_record,
                     record_count=count,
                 )
@@ -56,25 +71,32 @@ def cleared_orders(
         days = days - 1
 
 
-def archive_cleared_orders(
-        username: str,
-        application: str,
-        token: str,
-        days: int,
-        archive: pathlib.Path,
+def list_cleared_orders(
+        client: betfairlightweight.Betting,
+        date_range,
+        from_record,
+        record_count,
 ):
-    trading = betfairlightweight.APIClient(
-        username=username,
-        password="placeholder",
-        app_key=application,
+    return client.list_cleared_orders(
+        include_item_description=True,
+        settled_date_range=date_range,
+        from_record=from_record,
+        record_count=record_count,
     )
 
-    trading.set_session_token(token)
-    logger.info(f"Client initialized with session token for user: {username}")
 
-    with open(archive, "a+t") as file:
-        for response in cleared_orders(days, trading.betting):
-            json.dump(response._data, file)
+def list_current_orders(
+        client: betfairlightweight.Betting,
+        date_range,
+        from_record,
+        record_count,
+):
+    return client.list_current_orders(
+        include_item_description=True,
+        date_range=date_range,
+        from_record=from_record,
+        record_count=record_count,
+    )
 
 
 def main():
@@ -114,6 +136,14 @@ def main():
         help="The number of days to retreive."
     )
     parser.add_argument(
+        "-e",
+        "--endpoint",
+        required=True,
+        type=str,
+        choices=["cleared", "current"],
+        help="The endpoint (cleared, current)."
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         required=False,
@@ -129,13 +159,32 @@ def main():
     else:
         logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-    archive_cleared_orders(
+    client = create_client(
         arguments.username,
         arguments.key,
         arguments.token,
-        arguments.days,
-        pathlib.Path(arguments.archive),
     )
+
+    if arguments.endpoint == "cleared":
+        method = lambda date_range, from_record, record_count: list_cleared_orders(
+            client.betting,
+            date_range,
+            from_record,
+            record_count,
+        )
+    elif arguments.endpoint == "current":
+        method = lambda date_range, from_record, record_count: list_current_orders(
+            client.betting,
+            date_range,
+            from_record,
+            record_count,
+        )
+    else:
+        raise ValueError(f"Unknown endpoint {arguments.endpoint}")
+
+    with open(pathlib.Path(arguments.archive), "a+t") as file:
+        for response in paged_request(arguments.days, method):
+            json.dump(response._data, file)
 
 
 if __name__ == "__main__":
