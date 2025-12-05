@@ -46,9 +46,9 @@ def main():
         logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
     _configuration = read_configuration(pathlib.Path(arguments.configuration))
-    logger.info(_configuration["archive_key"])
-    logger.info(_configuration["backblaze_key_id"])
-    logger.info(_configuration["backblaze_key"])
+    logger.info(_configuration["archiving"]["archive_key"])
+    logger.info(_configuration["archiving"]["backblaze_key_id"])
+    logger.info(_configuration["archiving"]["backblaze_key"])
 
 if __name__ == "__main__":
     try:
