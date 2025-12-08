@@ -168,11 +168,6 @@ def extract(
         logger.debug(f"Schema of {_key} is {_df.schema}")
         _df.write_delta(_path, mode="append")
 
-def load() -> Iterator[IO]:
-    with open(pathlib.Path(r"/tmp/tmp6_sznx4c"), "rb") as _handle:
-        yield _handle
-    return
-
 def main():
     """Parses command-line arguments and runs the main logic."""
     parser = argparse.ArgumentParser(
