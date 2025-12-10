@@ -27,9 +27,10 @@ def configure_logging(
     )
 
 def extract_catalogues(
-    working: pathlib.Path,
+    source: pathlib.Path,
+    destination: pathlib.Path,
 ) -> None:
-    _catalogue = polars.read_delta(working / "catalogue")
+    _catalogue = polars.read_delta(source / "catalogue")
     _catalogue = _catalogue.filter(polars.col("response").struct.field("error").str.len_chars() == 0).select([
         polars.col("response").struct.field("timestamp").alias("timestamp"),
         polars.col("response").struct.field("body").alias("response"),
@@ -77,7 +78,7 @@ def extract_catalogues(
         polars.col("market").struct.field("event").struct.field("openDate").alias("event_open_date"),
     ])
 
-    _markets.write_csv("markets.csv")
+    _markets.write_csv(destination / "markets.csv")
 
     _runners = _catalogue.select([
         polars.col("timestamp"),
@@ -124,12 +125,13 @@ def extract_catalogues(
         polars.col("runner").struct.field("metadata").struct.field("WEIGHT_UNITS").alias("weight_units"),
     ])
 
-    _runners.write_csv("runners.csv")
+    _runners.write_csv(destination / "runners.csv")
 
 def extract_placements(
-    working: pathlib.Path,
+    source: pathlib.Path,
+    destination: pathlib.Path,
 ) -> None:
-    _placement = polars.read_delta(working / "placement")
+    _placement = polars.read_delta(source / "placement")
 
     _posted = _placement.filter(polars.col("response").struct.field("error").str.len_chars() == 0).select([
         polars.col("response").struct.field("timestamp").alias("timestamp"),
@@ -170,12 +172,13 @@ def extract_placements(
         polars.col("instruction_reports").struct.field("instruction").struct.field("limitOrder").struct.field("persistenceType").alias("persistence_type"),
     ]).drop("instruction_reports")
 
-    _posted.write_csv("posted.csv")
+    _posted.write_csv(destination / "posted.csv")
 
 def extract_updates(
-        working: pathlib.Path,
+        source: pathlib.Path,
+        destination: pathlib.Path,
 ) -> None:
-    _placement = polars.read_delta(working / "update")
+    _placement = polars.read_delta(source / "update")
 
 def main():
     """Parses command-line arguments and runs the main logic."""
@@ -183,11 +186,18 @@ def main():
         description="Report on log files."
     )
     parser.add_argument(
-        "-w",
-        "--working",
+        "-s",
+        "--source",
         required=True,
         type=str,
-        help="The working directory (used for interim files)."
+        help="The source directory (the raw parquet files)."
+    )
+    parser.add_argument(
+        "-d",
+        "--destination",
+        required=True,
+        type=str,
+        help="The output directory."
     )
     parser.add_argument(
         "-v",
@@ -201,10 +211,12 @@ def main():
 
     configure_logging(_arguments.verbose if _arguments.verbose else 0)
 
-    _working = pathlib.Path(_arguments.working)
-    extract_catalogues(_working)
-    extract_placements(_working)
-    extract_updates(_working)
+    _source = pathlib.Path(_arguments.source)
+    _destination = pathlib.Path(_arguments.destination)
+
+    extract_catalogues(_source, _destination)
+    extract_placements(_source _destination)
+    extract_updates(_source _destination)
 
 if __name__ == "__main__":
     try:
