@@ -172,6 +172,11 @@ def extract_placements(
 
     _posted.write_csv("posted.csv")
 
+def extract_updates(
+        working: pathlib.Path,
+) -> None:
+    _placement = polars.read_delta(working / "update")
+
 def main():
     """Parses command-line arguments and runs the main logic."""
     parser = argparse.ArgumentParser(
@@ -199,6 +204,7 @@ def main():
     _working = pathlib.Path(_arguments.working)
     extract_catalogues(_working)
     extract_placements(_working)
+    extract_updates(_working)
 
 if __name__ == "__main__":
     try:
