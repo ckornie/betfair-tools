@@ -11,7 +11,7 @@ logger: Final[logging.Logger] = logging.getLogger(__name__)
 infer_count: Final[int] = 10_000
 
 catalogues: Final[str] = "catalogues"
-definitions: Final[str] = "defintions"
+definitions: Final[str] = "definitions"
 postings: Final[str] = "postings"
 updates: Final[str] = "updates"
 
@@ -43,8 +43,7 @@ def save_schema(
     schema,
     destination: pathlib.Path,
 ) -> None:
-    _dataframe = polars.DataFrame(schema=schema)
-    _dataframe.write_parquet(destination)
+    polars.DataFrame(schema=schema).write_parquet(destination)
 
 def extract_catalogues(
     source: pathlib.Path,
@@ -59,14 +58,14 @@ def extract_catalogues(
         polars.col("response").struct.field("body").alias("response"),
     ])
 
-    _schema = load_schema(destination / "catalogues.schema")
+    _schema = load_schema(destination / f"{catalogues}.schema")
     if _schema is None:
         _schema = _catalogues.collect().get_column("response").str.json_decode(infer_schema_length=None).dtype
-        save_schema(_schema, destination / "catalogues.schema")
+        save_schema(_schema, destination / f"{catalogues}.schema")
         logger.debug(f"Inferred schema")
 
     _catalogues = _catalogues.select([
-        polars.col("timestamp"),
+        polars.col("timestamp").mul(1e9).cast(polars.Int64).cast(polars.Datetime("ns")).alias("timestamp"),
         polars.col("response").str.json_decode(_schema).alias("response"),
     ]).select([
         polars.col("timestamp"),
@@ -153,9 +152,9 @@ def extract_catalogues(
 
     logger.debug(f"Exploded runners")
 
-    _markets.sink_parquet(destination / "markets.parquet")
-    _runners.sink_parquet(destination / "runners.parquet")
-    logger.info(f"Wrote catalogues to {destination}")
+    _markets.sink_parquet(destination / catalogues / "markets.parquet", mkdir = True)
+    _runners.sink_parquet(destination / catalogues / "runners.parquet", mkdir = True)
+    logger.info(f"Wrote {catalogues} to {destination}")
 
 def extract_postings(
     source: pathlib.Path,
@@ -170,14 +169,14 @@ def extract_postings(
         polars.col("response").struct.field("body").alias("response"),
     ])
 
-    _schema = load_schema(destination / "postings.schema")
+    _schema = load_schema(destination / f"{postings}.schema")
     if _schema is None:
         _schema = _postings.collect().get_column("response").str.json_decode(infer_schema_length=None).dtype
-        save_schema(_schema, destination / "postings.schema")
+        save_schema(_schema, destination / f"{postings}.schema")
         logger.debug(f"Inferred schema")
 
     _postings = _postings.select([
-        polars.col("timestamp"),
+        polars.col("timestamp").mul(1e9).cast(polars.Int64).cast(polars.Datetime("ns")).alias("timestamp"),
         polars.col("response").str.json_decode(_schema).alias("response"),
     ]).select([
         polars.col("timestamp"),
@@ -210,8 +209,111 @@ def extract_postings(
 
     logger.debug(f"Exploded instruction reports")
 
-    _postings.sink_parquet(destination / "postings.parquet")
-    logger.info(f"Wrote postings to {destination}")
+    _postings.sink_parquet(destination / postings / f"{postings}.parquet", mkdir = True)
+    logger.info(f"Wrote {postings} to {destination}")
+
+
+def extract_definitions(
+    source: pathlib.Path,
+    destination: pathlib.Path,
+) -> None:
+    logger.info(f"Reading definitions from {source}")
+
+    _definitions = polars.scan_delta(source / definitions)
+    _definitions = _definitions.select([
+        polars.col("timestamp").mul(1e9).cast(polars.Int64).cast(polars.Datetime("ns")).alias("timestamp"),
+        polars.col("body").alias("message"),
+    ])
+
+    _schema = load_schema(destination / f"{definitions}.schema")
+    if _schema is None:
+        _schema = _definitions.collect().get_column("message").str.json_decode(infer_schema_length=None).dtype
+        save_schema(_schema, destination / f"{definitions}.schema")
+        logger.debug(f"Inferred schema")
+
+    _definitions = _definitions.select([
+        polars.col("timestamp"),
+        polars.col("message").str.json_decode(_schema).alias("message"),
+    ]).select([
+        polars.col("timestamp"),
+        polars.col("message").struct.field("clk").alias("feed_id"),
+        polars.col("message").struct.field("pt").alias("published_timestamp"),
+        polars.col("message").struct.field("mc").alias("market_change"),
+    ]).filter(polars.col("market_change").is_not_null())
+
+    logger.debug(f"Dropped heartbeats")
+
+    _definitions = _definitions.select([
+        polars.col("timestamp"),
+        polars.col("feed_id"),
+        polars.col("published_timestamp"),
+        polars.col("market_change").list.eval(polars.element().struct.field("id")).alias("market_id"),
+        polars.col("market_change").list.eval(polars.element().struct.field("marketDefinition")).alias("market_definition"),
+        polars.col("market_change").list.eval(polars.element().struct.field("tv")).alias("traded_value"),
+    ]).explode("market_id", "market_definition", "traded_value")
+
+    _markets = _definitions.select([
+        polars.col("timestamp"),
+        polars.col("feed_id"),
+        polars.col("published_timestamp"),
+        polars.col("market_id"),
+        polars.col("market_definition").struct.field("bspMarket").alias("bsp_market"),
+        polars.col("market_definition").struct.field("turnInPlayEnabled").alias("name"),
+        polars.col("market_definition").struct.field("persistenceEnabled").alias("persistence_enabled"),
+        polars.col("market_definition").struct.field("marketBaseRate").alias("market_base_rate"),
+        polars.col("market_definition").struct.field("eventId").alias("event_id"),
+        polars.col("market_definition").struct.field("eventTypeId").alias("event_type_id"),
+        polars.col("market_definition").struct.field("numberOfWinners").alias("number_of_winners"),
+        polars.col("market_definition").struct.field("bettingType").alias("betting_type"),
+        polars.col("market_definition").struct.field("marketType").alias("market_type"),
+        polars.col("market_definition").struct.field("marketTime").alias("market_time"),
+        polars.col("market_definition").struct.field("suspendTime").alias("suspend_time"),
+        polars.col("market_definition").struct.field("bspReconciled").alias("bsp_reconciled"),
+        polars.col("market_definition").struct.field("complete").alias("complete"),
+        polars.col("market_definition").struct.field("inPlay").alias("in_play"),
+        polars.col("market_definition").struct.field("crossMatching").alias("cross_matching"),
+        polars.col("market_definition").struct.field("runnersVoidable").alias("runners_voidable"),
+        polars.col("market_definition").struct.field("numberOfActiveRunners").alias("number_of_active_runners"),
+        polars.col("market_definition").struct.field("betDelay").alias("bet_delay"),
+        polars.col("market_definition").struct.field("status").alias("status"),
+        polars.col("market_definition").struct.field("venue").alias("venue"),
+        polars.col("market_definition").struct.field("countryCode").alias("country_code"),
+        polars.col("market_definition").struct.field("discountAllowed").alias("discount_allowed"),
+        polars.col("market_definition").struct.field("timezone").alias("timezone"),
+        polars.col("market_definition").struct.field("openDate").alias("open_date"),
+        polars.col("market_definition").struct.field("version").alias("version"),
+        polars.col("market_definition").struct.field("raceType").alias("race_type"),
+        polars.col("market_definition").struct.field("settledTime").alias("settled_time"),
+        polars.col("traded_value"),
+    ])
+
+    logger.debug(f"Exploded markets")
+
+    _runners = _definitions.select([
+        polars.col("timestamp"),
+        polars.col("feed_id"),
+        polars.col("published_timestamp"),
+        polars.col("market_id"),
+        polars.col("market_definition").struct.field("runners").alias("runner"),
+    ]).explode("runner").select([
+        polars.col("timestamp"),
+        polars.col("feed_id"),
+        polars.col("published_timestamp"),
+        polars.col("market_id"),
+        polars.col("runner").struct.field("id").alias("runner_id"),
+        polars.col("runner").struct.field("adjustmentFactor").alias("adjustment_factor"),
+        polars.col("runner").struct.field("status").alias("status"),
+        polars.col("runner").struct.field("sortPriority").alias("sort_priority"),
+        polars.col("runner").struct.field("removalDate").alias("removal_date"),
+        polars.col("runner").struct.field("bsp").alias("bsp"),
+    ])
+
+    logger.debug(f"Exploded runners")
+
+    _markets.sink_parquet(destination / definitions / f"markets.parquet", mkdir = True)
+    _runners.sink_parquet(destination / definitions / f"runners.parquet", mkdir = True)
+
+    logger.info(f"Wrote {definitions} to {destination}")
 
 def extract_updates(
     source: pathlib.Path,
@@ -259,7 +361,7 @@ def extract_updates(
         polars.col("orders").struct.unnest(),
     ])
 
-    _updates.sink_parquet(destination / "updates.parquet")
+    _updates.sink_parquet(destination / updates / "updates.parquet", mkdir = True)
     logger.info(f"Wrote updates to {destination}")
 
 
@@ -298,6 +400,7 @@ def main():
     _destination = pathlib.Path(_arguments.destination)
 
     extract_catalogues(_source, _destination)
+    extract_definitions(_source, _destination)
     extract_postings(_source, _destination)
     extract_updates(_source, _destination)
 
