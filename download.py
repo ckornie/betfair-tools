@@ -139,10 +139,10 @@ def extract(
     working: pathlib.Path,
 ) -> None:
     _buffers: Dict[str, IO] = {
-        "catalogue": io.BytesIO(),
-        "definition": io.BytesIO(),
-        "placement": io.BytesIO(),
-        "update": io.BytesIO(),
+        "catalogues": io.BytesIO(),
+        "definitions": io.BytesIO(),
+        "postings": io.BytesIO(),
+        "updates": io.BytesIO(),
     }
 
     for _member in tar.getmembers():
@@ -151,13 +151,13 @@ def extract(
             with tar.extractfile(_member) as _file, io.TextIOWrapper(_file) as _log:
                 for _line in _log:
                     if "listMarketCatalogue" in _line:
-                        _buffers["catalogue"].write(_line.encode('utf-8'))
+                        _buffers["catalogues"].write(_line.encode('utf-8'))
                     elif "marketDefinition" in _line:
-                        _buffers["definition"].write(_line.encode('utf-8'))
+                        _buffers["definitions"].write(_line.encode('utf-8'))
                     elif "placeOrders" in _line:
-                        _buffers["placement"].write(_line.encode('utf-8'))
+                        _buffers["postings"].write(_line.encode('utf-8'))
                     elif "ocm" in _line:
-                        _buffers["update"].write(_line.encode('utf-8'))
+                        _buffers["updates"].write(_line.encode('utf-8'))
 
     for _key, _value in _buffers.items():
         _value.seek(0)

@@ -5,9 +5,15 @@ import sys
 import traceback
 import polars
 
-from typing import Final
+from typing import Final, Optional, Any
 
 logger: Final[logging.Logger] = logging.getLogger(__name__)
+infer_count: Final[int] = 10_000
+
+catalogues: Final[str] = "catalogues"
+definitions: Final[str] = "defintions"
+postings: Final[str] = "postings"
+updates: Final[str] = "updates"
 
 def configure_logging(
     verbosity: int,
@@ -26,28 +32,50 @@ def configure_logging(
         format="%(asctime)s %(levelname)s (%(process)d): %(message)s",
     )
 
+def load_schema(
+    destination: pathlib.Path,
+) -> Optional[polars.schema.Schema]:
+    if destination.exists():
+        return polars.Struct(polars.read_parquet_schema(destination))
+    return None
+
+def save_schema(
+    schema,
+    destination: pathlib.Path,
+) -> None:
+    _dataframe = polars.DataFrame(schema=schema)
+    _dataframe.write_parquet(destination)
+
 def extract_catalogues(
     source: pathlib.Path,
     destination: pathlib.Path,
 ) -> None:
-    _catalogue = polars.read_delta(source / "catalogue")
-    _catalogue = _catalogue.filter(polars.col("response").struct.field("error").str.len_chars() == 0).select([
+    logger.info(f"Reading catalogues from {source}")
+
+    _catalogues = polars.scan_delta(source / catalogues)
+
+    _catalogues = _catalogues.filter(polars.col("response").struct.field("error").str.len_chars() == 0).select([
         polars.col("response").struct.field("timestamp").alias("timestamp"),
         polars.col("response").struct.field("body").alias("response"),
     ])
 
-    _schema = _catalogue.get_column("response").str.json_decode(infer_schema_length=None).dtype
-    _catalogue = _catalogue.select([
+    _schema = load_schema(destination / "catalogues.schema")
+    if _schema is None:
+        _schema = _catalogues.collect().get_column("response").str.json_decode(infer_schema_length=None).dtype
+        save_schema(_schema, destination / "catalogues.schema")
+        logger.debug(f"Inferred schema")
+
+    _catalogues = _catalogues.select([
         polars.col("timestamp"),
         polars.col("response").str.json_decode(_schema).alias("response"),
-    ])
-
-    _catalogue = _catalogue.select([
+    ]).select([
         polars.col("timestamp"),
         polars.col("response").struct.field("result").alias("market"),
     ]).explode("market")
 
-    _markets = _catalogue.select([
+    logger.debug(f"Exploded markets")
+
+    _markets = _catalogues.select([
         polars.col("timestamp"),
         polars.col("market").struct.field("marketId").alias("id"),
         polars.col("market").struct.field("marketName").alias("name"),
@@ -78,9 +106,7 @@ def extract_catalogues(
         polars.col("market").struct.field("event").struct.field("openDate").alias("event_open_date"),
     ])
 
-    _markets.write_csv(destination / "markets.csv")
-
-    _runners = _catalogue.select([
+    _runners = _catalogues.select([
         polars.col("timestamp"),
         polars.col("market").struct.field("marketId").alias("market_id"),
         polars.col("market").struct.field("runners").alias("runner"),
@@ -125,22 +151,32 @@ def extract_catalogues(
         polars.col("runner").struct.field("metadata").struct.field("WEIGHT_UNITS").alias("weight_units"),
     ])
 
-    _runners.write_csv(destination / "runners.csv")
+    logger.debug(f"Exploded runners")
 
-def extract_placements(
+    _markets.sink_parquet(destination / "markets.parquet")
+    _runners.sink_parquet(destination / "runners.parquet")
+    logger.info(f"Wrote catalogues to {destination}")
+
+def extract_postings(
     source: pathlib.Path,
     destination: pathlib.Path,
 ) -> None:
-    _placement = polars.read_delta(source / "placement")
+    logger.info(f"Reading postings from {source}")
 
-    _posted = _placement.filter(polars.col("response").struct.field("error").str.len_chars() == 0).select([
+    _postings = polars.scan_delta(source / postings)
+
+    _postings = _postings.filter(polars.col("response").struct.field("error").str.len_chars() == 0).select([
         polars.col("response").struct.field("timestamp").alias("timestamp"),
         polars.col("response").struct.field("body").alias("response"),
     ])
 
-    _schema = _posted.get_column("response").str.json_decode(infer_schema_length=None).dtype
+    _schema = load_schema(destination / "postings.schema")
+    if _schema is None:
+        _schema = _postings.collect().get_column("response").str.json_decode(infer_schema_length=None).dtype
+        save_schema(_schema, destination / "postings.schema")
+        logger.debug(f"Inferred schema")
 
-    _posted = _posted.select([
+    _postings = _postings.select([
         polars.col("timestamp"),
         polars.col("response").str.json_decode(_schema).alias("response"),
     ]).select([
@@ -172,13 +208,60 @@ def extract_placements(
         polars.col("instruction_reports").struct.field("instruction").struct.field("limitOrder").struct.field("persistenceType").alias("persistence_type"),
     ]).drop("instruction_reports")
 
-    _posted.write_csv(destination / "posted.csv")
+    logger.debug(f"Exploded instruction reports")
+
+    _postings.sink_parquet(destination / "postings.parquet")
+    logger.info(f"Wrote postings to {destination}")
 
 def extract_updates(
-        source: pathlib.Path,
-        destination: pathlib.Path,
+    source: pathlib.Path,
+    destination: pathlib.Path,
 ) -> None:
-    _placement = polars.read_delta(source / "update")
+    logger.info(f"Reading updates from {source}")
+
+    _updates = polars.scan_delta(source / updates)
+    _updates = _updates.select([
+        polars.col("timestamp").mul(1e9).cast(polars.Int64).cast(polars.Datetime("ns")).alias("timestamp"),
+        polars.col("body").alias("message"),
+    ])
+
+    _schema = load_schema(destination / "updates.schema")
+    if _schema is None:
+        _schema = _updates.collect().get_column("message").str.json_decode(infer_schema_length=None).dtype
+        save_schema(_schema, destination / "updates.schema")
+        logger.debug(f"Inferred schema")
+
+    _updates = _updates.select([
+        polars.col("timestamp"),
+        polars.col("message").str.json_decode(_schema).alias("message"),
+    ]).select([
+        polars.col("timestamp"),
+        polars.col("message").struct.field("clk").alias("feed_id"),
+        polars.col("message").struct.field("pt").alias("published_timestamp"),
+        polars.col("message").struct.field("oc").alias("order_change"),
+    ]).filter(polars.col("order_change").is_not_null())
+
+    logger.debug(f"Dropped heartbeats")
+
+    _updates = _updates.select([
+        polars.col("timestamp"),
+        polars.col("feed_id"),
+        polars.col("published_timestamp"),
+        polars.col("order_change").list.eval(polars.element().struct.field("id")).alias("market_id"),
+        polars.col("order_change").list.eval(polars.element().struct.field("orc").list.eval(polars.element().struct.field("id"))).alias("runner_id"),
+        polars.col("order_change").list.eval(polars.element().struct.field("orc").list.eval(polars.element().struct.field("uo"))).alias("orders"),
+    ]).explode("market_id", "runner_id", "orders").explode("runner_id", "orders").explode("orders")
+
+    logger.debug(f"Exploded orders")
+
+    _updates = _updates.select([
+        polars.exclude("orders"),
+        polars.col("orders").struct.unnest(),
+    ])
+
+    _updates.sink_parquet(destination / "updates.parquet")
+    logger.info(f"Wrote updates to {destination}")
+
 
 def main():
     """Parses command-line arguments and runs the main logic."""
@@ -215,8 +298,8 @@ def main():
     _destination = pathlib.Path(_arguments.destination)
 
     extract_catalogues(_source, _destination)
-    extract_placements(_source _destination)
-    extract_updates(_source _destination)
+    extract_postings(_source, _destination)
+    extract_updates(_source, _destination)
 
 if __name__ == "__main__":
     try:
