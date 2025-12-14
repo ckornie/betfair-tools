@@ -66,20 +66,41 @@ def backblaze(
         logger.error(f"Connection error: {error}")
         raise
 
+def download_check(
+    directory: pathlib.Path,
+    download: str,
+    pattern: str,
+) -> bool:
+    if "housekeeping" in download:
+        logger.debug(f"Ignoring {download} due to housekeeping archive")
+        return False
+
+    if not re.match(pattern, download):
+        logger.debug(f"Ignoring {download} due to pattern mismatch")
+        return False
+
+    _, _, _file = download.partition(r"/")
+    _stem, _, _ = _file.partition(r".tar.zst")
+
+    for _path in directory.rglob(f"{_stem}.parquet"):
+        logger.debug(f"Ignoring {download} due to existing file {_path}")
+        return False
+    return True
+
 def download_all(
     client: B2Api,
     bucket: str,
     pattern: str,
-    working: pathlib.Path,
+    destination: pathlib.Path,
 ) -> Iterator[IO]:
     _bucket = client.get_bucket_by_name(bucket)
     for _file, _folder in _bucket.ls(latest_only=True, recursive=True):
-        if re.match(pattern, _file.file_name):
+        if download_check(destination, _file.file_name, pattern):
             logger.info(f"Downloading {_file.file_name}")
             _listener = DoNothingProgressListener()
             _download = _file.download(_listener)
 
-            with tempfile.NamedTemporaryFile("w+b", dir=working) as _handle:
+            with tempfile.NamedTemporaryFile("w+b", dir=destination) as _handle:
                 logger.debug(f"Saving to {_handle.name}")
                 _download.save(_handle)
                 _handle.flush()
@@ -89,7 +110,7 @@ def download_all(
 def decrypt(
     data: IO,
     password: str,
-    working: pathlib.Path,
+    destination: pathlib.Path,
 ) -> IO:
     if data.read(8) != b'Salted__':
         raise ValueError("Input data does not start with magic string")
@@ -126,7 +147,7 @@ def decrypt(
 
     logger.debug(f"Length of plaintext was {len(_plaintext)} with padding of {_padding}")
 
-    _handle = tempfile.NamedTemporaryFile(mode="w+b", dir=working)
+    _handle = tempfile.NamedTemporaryFile(mode="w+b", dir=destination)
     _handle.write(_plaintext)
     _handle.flush()
     _handle.seek(0)
@@ -136,12 +157,13 @@ def decrypt(
 
 def extract(
     tar: tarfile.TarFile,
-    working: pathlib.Path,
+    destination: pathlib.Path,
 ) -> None:
     _buffers: Dict[str, IO] = {
         "catalogues": io.BytesIO(),
         "definitions": io.BytesIO(),
-        "postings": io.BytesIO(),
+        "posts": io.BytesIO(),
+        "cancels": io.BytesIO(),
         "updates": io.BytesIO(),
     }
 
@@ -155,18 +177,34 @@ def extract(
                     elif "marketDefinition" in _line:
                         _buffers["definitions"].write(_line.encode('utf-8'))
                     elif "placeOrders" in _line:
-                        _buffers["postings"].write(_line.encode('utf-8'))
-                    elif "ocm" in _line:
+                        _buffers["posts"].write(_line.encode('utf-8'))
+                    elif "cancelOrders" in _line:
+                        _buffers["cancels"].write(_line.encode('utf-8'))
+                    elif r'\"op\":\"ocm\"' in _line:
                         _buffers["updates"].write(_line.encode('utf-8'))
 
-    for _key, _value in _buffers.items():
-        _value.seek(0)
-        _path = working / _key
+            for _key, _value in _buffers.items():
+                _value.seek(0)
 
-        logger.info(f"Writing {_key} to {_path}")
-        _df = polars.read_ndjson(_value).drop("telemetry", strict=False)
-        logger.debug(f"Schema of {_key} is {_df.schema}")
-        _df.write_delta(_path, mode="append")
+                _filename, _, _ = _member.name.partition(r"/")
+                _path = destination / _key / f"{_filename}.parquet"
+
+                if _path.exists():
+                    logger.info(f"Ignored {_key} from {_filename} as {_path} exists")
+                else:
+                    _path.parent.mkdir(parents=True, exist_ok=True)
+
+                    try:
+                        _df = polars.read_ndjson(_value).drop("telemetry", strict=False)
+                        logger.debug(f"Schema of {_key} is {_df.schema}")
+
+                        _df.write_parquet(_path)
+
+                        logger.info(f"Wrote {_key} from {_filename} to {_path}")
+                    except Exception as _exception:
+                        logger.warning(f"Ignored {_key} from {_filename} due to {_exception}")
+
+
 
 def main():
     """Parses command-line arguments and runs the main logic."""
@@ -189,11 +227,11 @@ def main():
         help="The pattern used to match archives (e.g., '2025.*.zst')."
     )
     parser.add_argument(
-        "-w",
-        "--working",
+        "-d",
+        "--destination",
         required=True,
         type=str,
-        help="The working directory (used for interim files)."
+        help="The destination directory (also used for interim files)."
     )
     parser.add_argument(
         "-v",
@@ -211,16 +249,17 @@ def main():
     _password = _configuration["archiving"]["archive_key"]
     _bucket = _configuration["archiving"]["backblaze_bucket"]
     _pattern = _arguments.pattern
-    _working = pathlib.Path(_arguments.working)
+    _destination = pathlib.Path(_arguments.destination)
+    _destination.mkdir(parents=True, exist_ok=True)
 
     _client = backblaze(
         _configuration["archiving"]["backblaze_key_id"],
         _configuration["archiving"]["backblaze_key"],
     )
 
-    for _archive in download_all(_client, _bucket, _pattern, _working):
-        with decrypt(_archive, _password, _working) as _zstd, tarfile.open(fileobj=_zstd, mode='r:zst') as _tar:
-            extract(_tar, _working)
+    for _archive in download_all(_client, _bucket, _pattern, _destination):
+        with decrypt(_archive, _password, _destination) as _zstd, tarfile.open(fileobj=_zstd, mode='r:zst') as _tar:
+            extract(_tar, _destination)
 
 
 if __name__ == "__main__":
