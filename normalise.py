@@ -12,7 +12,8 @@ infer_count: Final[int] = 10_000
 
 catalogues: Final[str] = "catalogues"
 definitions: Final[str] = "definitions"
-postings: Final[str] = "postings"
+posts: Final[str] = "posts"
+cancels: Final[str] = "cancels"
 updates: Final[str] = "updates"
 
 def configure_logging(
@@ -33,10 +34,10 @@ def configure_logging(
     )
 
 def load_schema(
-    destination: pathlib.Path,
+    source: pathlib.Path,
 ) -> Optional[polars.schema.Schema]:
-    if destination.exists():
-        return polars.Struct(polars.read_parquet_schema(destination))
+    if source.exists():
+        return polars.Struct(polars.read_parquet_schema(source))
     return None
 
 def save_schema(
@@ -46,28 +47,39 @@ def save_schema(
     polars.DataFrame(schema=schema).write_parquet(destination)
 
 def extract_catalogues(
-    source: pathlib.Path,
-    destination: pathlib.Path,
+    raw: pathlib.Path,
+    normalised: pathlib.Path,
+    schema: pathlib.Path,
+    partition: str,
 ) -> None:
-    logger.info(f"Reading catalogues from {source}")
+    _path = raw / catalogues / f"{partition}*"
+    logger.info(f"Reading {catalogues} from {_path}")
 
-    _catalogues = polars.scan_delta(source / catalogues)
+    _catalogues = polars.scan_parquet(
+        _path,
+        glob=True,
+        include_file_paths="path",
+        cast_options=polars.ScanCastOptions(extra_struct_fields="ignore"),
+    )
 
     _catalogues = _catalogues.filter(polars.col("response").struct.field("error").str.len_chars() == 0).select([
+        polars.col("path"),
         polars.col("response").struct.field("timestamp").alias("timestamp"),
         polars.col("response").struct.field("body").alias("response"),
     ])
 
-    _schema = load_schema(destination / f"{catalogues}.schema")
+    _schema = load_schema(schema / f"{catalogues}.schema")
     if _schema is None:
         _schema = _catalogues.collect().get_column("response").str.json_decode(infer_schema_length=None).dtype
-        save_schema(_schema, destination / f"{catalogues}.schema")
+        save_schema(_schema, schema / f"{catalogues}.schema")
         logger.debug(f"Inferred schema")
 
     _catalogues = _catalogues.select([
+        polars.col("path"),
         polars.col("timestamp").mul(1e9).cast(polars.Int64).cast(polars.Datetime("ns")).alias("timestamp"),
         polars.col("response").str.json_decode(_schema).alias("response"),
     ]).select([
+        polars.col("path"),
         polars.col("timestamp"),
         polars.col("response").struct.field("result").alias("market"),
     ]).explode("market")
@@ -75,9 +87,10 @@ def extract_catalogues(
     logger.debug(f"Exploded markets")
 
     _markets = _catalogues.select([
+        polars.col("path"),
         polars.col("timestamp"),
-        polars.col("market").struct.field("marketId").alias("id"),
-        polars.col("market").struct.field("marketName").alias("name"),
+        polars.col("market").struct.field("marketId").alias("market_id"),
+        polars.col("market").struct.field("marketName").alias("market_name"),
         polars.col("market").struct.field("marketStartTime").alias("start_time"),
         polars.col("market").struct.field("description").struct.field("persistenceEnabled").alias("persistence_enabled"),
         polars.col("market").struct.field("description").struct.field("bspMarket").alias("bsp_market"),
@@ -106,14 +119,16 @@ def extract_catalogues(
     ])
 
     _runners = _catalogues.select([
+        polars.col("path"),
         polars.col("timestamp"),
         polars.col("market").struct.field("marketId").alias("market_id"),
         polars.col("market").struct.field("runners").alias("runner"),
     ]).explode("runner").select([
+        polars.col("path"),
         polars.col("timestamp"),
         polars.col("market_id"),
-        polars.col("runner").struct.field("selectionId").alias("id"),
-        polars.col("runner").struct.field("runnerName").alias("name"),
+        polars.col("runner").struct.field("runnerName").alias("runner_name"),
+        polars.col("runner").struct.field("selectionId").alias("runner_id"),
         polars.col("runner").struct.field("handicap").alias("handicap"),
         polars.col("runner").struct.field("sortPriority").alias("sort_priority"),
         polars.col("runner").struct.field("metadata").struct.field("SIRE_NAME").alias("sire_name"),
@@ -133,7 +148,6 @@ def extract_catalogues(
         polars.col("runner").struct.field("metadata").struct.field("JOCKEY_NAME").alias("jockey_name"),
         polars.col("runner").struct.field("metadata").struct.field("DAM_BRED").alias("dam_bred"),
         polars.col("runner").struct.field("metadata").struct.field("ADJUSTED_RATING").alias("adjuster_rating"),
-        polars.col("runner").struct.field("metadata").struct.field("runnerId").alias("runner_id"),
         polars.col("runner").struct.field("metadata").struct.field("CLOTH_NUMBER").alias("cloth_number"),
         polars.col("runner").struct.field("metadata").struct.field("SIRE_YEAR_BORN").alias("sire_year_born"),
         polars.col("runner").struct.field("metadata").struct.field("TRAINER_NAME").alias("trainer_name"),
@@ -152,44 +166,62 @@ def extract_catalogues(
 
     logger.debug(f"Exploded runners")
 
-    _markets.sink_parquet(destination / catalogues / "markets.parquet", mkdir = True)
-    _runners.sink_parquet(destination / catalogues / "runners.parquet", mkdir = True)
-    logger.info(f"Wrote {catalogues} to {destination}")
+    _path = normalised / "markets" / f"{catalogues}_{partition}.parquet"
+    _markets.sink_parquet(_path, mkdir = True)
+    logger.info(f"Wrote market {catalogues} to {_path}")
 
-def extract_postings(
-    source: pathlib.Path,
-    destination: pathlib.Path,
+    _path = normalised / "runners" / f"{catalogues}_{partition}.parquet"
+    _runners.sink_parquet(_path, mkdir = True)
+    logger.info(f"Wrote runner {catalogues} to {_path}")
+
+def extract_posts(
+    raw: pathlib.Path,
+    normalised: pathlib.Path,
+    schema: pathlib.Path,
+    partition: str,
 ) -> None:
-    logger.info(f"Reading postings from {source}")
+    _path = raw / posts / f"{partition}*"
+    logger.info(f"Reading {posts} from {_path}")
 
-    _postings = polars.scan_delta(source / postings)
+    _posts = polars.scan_parquet(
+        _path,
+        glob=True,
+        include_file_paths="path",
+        cast_options=polars.ScanCastOptions(extra_struct_fields="ignore"),
+    )
 
-    _postings = _postings.filter(polars.col("response").struct.field("error").str.len_chars() == 0).select([
+    # There is a missing field, 'customerStrategyRef', which we would need to get from the request.
+    # For the moment we'll ignore it, due to the fact that it is on the updates.
+    _posts = _posts.filter(polars.col("response").struct.field("error").str.len_chars() == 0).select([
+        polars.col("path"),
         polars.col("response").struct.field("timestamp").alias("timestamp"),
         polars.col("response").struct.field("body").alias("response"),
     ])
 
-    _schema = load_schema(destination / f"{postings}.schema")
+    _schema = load_schema(schema / f"{posts}.schema")
     if _schema is None:
-        _schema = _postings.collect().get_column("response").str.json_decode(infer_schema_length=None).dtype
-        save_schema(_schema, destination / f"{postings}.schema")
+        _schema = _posts.collect().get_column("response").str.json_decode(infer_schema_length=None).dtype
+        save_schema(_schema, schema / f"{posts}.schema")
         logger.debug(f"Inferred schema")
 
-    _postings = _postings.select([
+    _posts = _posts.select([
+        polars.col("path"),
         polars.col("timestamp").mul(1e9).cast(polars.Int64).cast(polars.Datetime("ns")).alias("timestamp"),
         polars.col("response").str.json_decode(_schema).alias("response"),
     ]).select([
+        polars.col("path"),
         polars.col("timestamp"),
-        polars.col("response").struct.field("id").alias("id"),
-        polars.col("response").struct.field("result").alias("posted"),
+        polars.col("response").struct.field("id").alias("request_id"),
+        polars.col("response").struct.field("result").alias("response"),
     ]).select([
+        polars.col("path"),
         polars.col("timestamp"),
-        polars.col("id"),
-        polars.col("posted").struct.field("customerRef").alias("customer_reference"),
-        polars.col("posted").struct.field("status").alias("status"),
-        polars.col("posted").struct.field("errorCode").alias("error_code"),
-        polars.col("posted").struct.field("marketId").alias("market_id"),
-        polars.col("posted").struct.field("instructionReports").alias("instruction_reports"),
+        polars.col("request_id"),
+        polars.col("response").struct.field("customerRef").alias("customer_reference"),
+        polars.col("response").struct.field("status").alias("status"),
+        polars.col("response").struct.field("errorCode").alias("error_code"),
+        polars.col("response").struct.field("marketId").alias("market_id"),
+        polars.col("response").struct.field("instructionReports").alias("instruction_reports"),
     ]).explode("instruction_reports").with_columns([
         polars.col("instruction_reports").struct.field("status").alias("status"),
         polars.col("instruction_reports").struct.field("errorCode").alias("error_code"),
@@ -209,32 +241,104 @@ def extract_postings(
 
     logger.debug(f"Exploded instruction reports")
 
-    _postings.sink_parquet(destination / postings / f"{postings}.parquet", mkdir = True)
-    logger.info(f"Wrote {postings} to {destination}")
+    _path = normalised / "orders" / f"{posts}_{partition}.parquet"
+    _posts.sink_parquet(_path, mkdir = True)
+    logger.info(f"Wrote order {posts} to {_path}")
 
+def extract_cancels(
+    raw: pathlib.Path,
+    normalised: pathlib.Path,
+    schema: pathlib.Path,
+    partition: str,
+) -> None:
+    _path = raw / cancels / f"{partition}*"
+    logger.info(f"Reading {cancels} from {_path}")
+
+    _cancels = polars.scan_parquet(
+        _path,
+        glob=True,
+        include_file_paths="path",
+        cast_options=polars.ScanCastOptions(extra_struct_fields="ignore"),
+    )
+
+    _cancels = _cancels.filter(polars.col("response").struct.field("error").str.len_chars() == 0).select([
+        polars.col("path"),
+        polars.col("response").struct.field("timestamp").alias("timestamp"),
+        polars.col("response").struct.field("body").alias("response"),
+    ])
+
+    _schema = load_schema(schema / f"{cancels}.schema")
+    if _schema is None:
+        _schema = _cancels.collect().get_column("response").str.json_decode(infer_schema_length=None).dtype
+        save_schema(_schema, schema / f"{cancels}.schema")
+        logger.debug(f"Inferred schema")
+
+    _cancels = _cancels.select([
+        polars.col("path"),
+        polars.col("timestamp").mul(1e9).cast(polars.Int64).cast(polars.Datetime("ns")).alias("timestamp"),
+        polars.col("response").str.json_decode(_schema).alias("response"),
+    ]).select([
+            polars.col("path"),
+            polars.col("timestamp"),
+            polars.col("response").struct.field("id").alias("request_id"),
+            polars.col("response").struct.field("result").alias("response"),
+        ]).select([
+            polars.col("path"),
+            polars.col("timestamp"),
+            polars.col("request_id"),
+            polars.col("response").struct.field("customerRef").alias("customer_reference"),
+            polars.col("response").struct.field("status").alias("status"),
+            polars.col("response").struct.field("errorCode").alias("error_code"),
+            polars.col("response").struct.field("marketId").alias("market_id"),
+            polars.col("response").struct.field("instructionReports").alias("instruction_reports"),
+        ]).explode("instruction_reports").with_columns([
+            polars.col("instruction_reports").struct.field("status").alias("status"),
+            polars.col("instruction_reports").struct.field("errorCode").alias("error_code"),
+            polars.col("instruction_reports").struct.field("cancelledDate").alias("cancelled_date"),
+            polars.col("instruction_reports").struct.field("sizeCancelled").alias("size_cancelled"),
+            polars.col("instruction_reports").struct.field("instruction").struct.field("betId").alias("bet_id"),
+        ]).drop("instruction_reports")
+
+    logger.debug(f"Exploded instruction reports")
+
+    _path = normalised / "orders" / f"{cancels}_{partition}.parquet"
+    _cancels.sink_parquet(_path, mkdir = True)
+    logger.info(f"Wrote order {cancels} to {_path}")
 
 def extract_definitions(
-    source: pathlib.Path,
-    destination: pathlib.Path,
+    raw: pathlib.Path,
+    normalised: pathlib.Path,
+    schema: pathlib.Path,
+    partition: str,
 ) -> None:
-    logger.info(f"Reading definitions from {source}")
+    _path = raw / definitions / f"{partition}*"
+    logger.info(f"Reading {definitions} from {_path}")
 
-    _definitions = polars.scan_delta(source / definitions)
+    _definitions = polars.scan_parquet(
+        _path,
+        glob=True,
+        include_file_paths="path",
+        cast_options=polars.ScanCastOptions(extra_struct_fields="ignore"),
+    )
+
     _definitions = _definitions.select([
+        polars.col("path"),
         polars.col("timestamp").mul(1e9).cast(polars.Int64).cast(polars.Datetime("ns")).alias("timestamp"),
         polars.col("body").alias("message"),
     ])
 
-    _schema = load_schema(destination / f"{definitions}.schema")
+    _schema = load_schema(schema / f"{definitions}.schema")
     if _schema is None:
         _schema = _definitions.collect().get_column("message").str.json_decode(infer_schema_length=None).dtype
-        save_schema(_schema, destination / f"{definitions}.schema")
+        save_schema(_schema, schema / f"{definitions}.schema")
         logger.debug(f"Inferred schema")
 
     _definitions = _definitions.select([
+        polars.col("path"),
         polars.col("timestamp"),
-        polars.col("message").str.json_decode(_schema).alias("message"),
+        polars.col("message").str.replace_all(r'"Infinity"|"NaN"', "null").str.json_decode(_schema).alias("message"),
     ]).select([
+        polars.col("path"),
         polars.col("timestamp"),
         polars.col("message").struct.field("clk").alias("feed_id"),
         polars.col("message").struct.field("pt").alias("published_timestamp"),
@@ -244,6 +348,7 @@ def extract_definitions(
     logger.debug(f"Dropped heartbeats")
 
     _definitions = _definitions.select([
+        polars.col("path"),
         polars.col("timestamp"),
         polars.col("feed_id"),
         polars.col("published_timestamp"),
@@ -253,12 +358,13 @@ def extract_definitions(
     ]).explode("market_id", "market_definition", "traded_value")
 
     _markets = _definitions.select([
+        polars.col("path"),
         polars.col("timestamp"),
         polars.col("feed_id"),
         polars.col("published_timestamp"),
         polars.col("market_id"),
         polars.col("market_definition").struct.field("bspMarket").alias("bsp_market"),
-        polars.col("market_definition").struct.field("turnInPlayEnabled").alias("name"),
+        polars.col("market_definition").struct.field("turnInPlayEnabled").alias("turn_in_play_enabled"),
         polars.col("market_definition").struct.field("persistenceEnabled").alias("persistence_enabled"),
         polars.col("market_definition").struct.field("marketBaseRate").alias("market_base_rate"),
         polars.col("market_definition").struct.field("eventId").alias("event_id"),
@@ -290,12 +396,14 @@ def extract_definitions(
     logger.debug(f"Exploded markets")
 
     _runners = _definitions.select([
+        polars.col("path"),
         polars.col("timestamp"),
         polars.col("feed_id"),
         polars.col("published_timestamp"),
         polars.col("market_id"),
         polars.col("market_definition").struct.field("runners").alias("runner"),
     ]).explode("runner").select([
+        polars.col("path"),
         polars.col("timestamp"),
         polars.col("feed_id"),
         polars.col("published_timestamp"),
@@ -310,33 +418,48 @@ def extract_definitions(
 
     logger.debug(f"Exploded runners")
 
-    _markets.sink_parquet(destination / definitions / f"markets.parquet", mkdir = True)
-    _runners.sink_parquet(destination / definitions / f"runners.parquet", mkdir = True)
+    _path = normalised / "markets" / f"{definitions}_{partition}.parquet"
+    _markets.sink_parquet(_path, mkdir = True)
+    logger.info(f"Wrote market {definitions} to {_path}")
 
-    logger.info(f"Wrote {definitions} to {destination}")
+    _path = normalised / "runners" / f"{definitions}_{partition}.parquet"
+    _runners.sink_parquet(_path, mkdir = True)
+    logger.info(f"Wrote runner {definitions} to {_path}")
 
 def extract_updates(
-    source: pathlib.Path,
-    destination: pathlib.Path,
+    raw: pathlib.Path,
+    normalised: pathlib.Path,
+    schema: pathlib.Path,
+    partition: str,
 ) -> None:
-    logger.info(f"Reading updates from {source}")
+    _path = raw / updates / f"{partition}*"
+    logger.info(f"Reading {updates} from {_path}")
 
-    _updates = polars.scan_delta(source / updates)
+    _updates = polars.scan_parquet(
+        _path,
+        glob=True,
+        include_file_paths="path",
+        cast_options=polars.ScanCastOptions(extra_struct_fields="ignore"),
+    )
+
     _updates = _updates.select([
+        polars.col("path"),
         polars.col("timestamp").mul(1e9).cast(polars.Int64).cast(polars.Datetime("ns")).alias("timestamp"),
         polars.col("body").alias("message"),
     ])
 
-    _schema = load_schema(destination / "updates.schema")
+    _schema = load_schema(schema / "updates.schema")
     if _schema is None:
         _schema = _updates.collect().get_column("message").str.json_decode(infer_schema_length=None).dtype
-        save_schema(_schema, destination / "updates.schema")
+        save_schema(_schema, schema / "updates.schema")
         logger.debug(f"Inferred schema")
 
     _updates = _updates.select([
+        polars.col("path"),
         polars.col("timestamp"),
-        polars.col("message").str.json_decode(_schema).alias("message"),
+        polars.col("message").str.replace_all(r'"Infinity"|"NaN"', "null").str.json_decode(_schema).alias("message"),
     ]).select([
+        polars.col("path"),
         polars.col("timestamp"),
         polars.col("message").struct.field("clk").alias("feed_id"),
         polars.col("message").struct.field("pt").alias("published_timestamp"),
@@ -346,6 +469,7 @@ def extract_updates(
     logger.debug(f"Dropped heartbeats")
 
     _updates = _updates.select([
+        polars.col("path"),
         polars.col("timestamp"),
         polars.col("feed_id"),
         polars.col("published_timestamp"),
@@ -358,11 +482,34 @@ def extract_updates(
 
     _updates = _updates.select([
         polars.exclude("orders"),
-        polars.col("orders").struct.unnest(),
+        polars.col("orders").struct.field("id").alias("bet_id"),
+        polars.col("orders").struct.field("p").alias("price"),
+        polars.col("orders").struct.field("s").alias("size"),
+        polars.col("orders").struct.field("bsp").alias("bsp_liability"),
+        polars.col("orders").struct.field("side").alias("side"),
+        polars.col("orders").struct.field("status").alias("status"),
+        polars.col("orders").struct.field("pt").alias("persistence_type"),
+        polars.col("orders").struct.field("ot").alias("order_type"),
+        polars.col("orders").struct.field("pd").alias("placed_date"),
+        polars.col("orders").struct.field("md").alias("matched_date"),
+        polars.col("orders").struct.field("cd").alias("cancelled_date"),
+        polars.col("orders").struct.field("ld").alias("lapsed_date"),
+        polars.col("orders").struct.field("lsrc").alias("lapsed_status_reason_code"),
+        polars.col("orders").struct.field("avp").alias("average_price_matched"),
+        polars.col("orders").struct.field("sm").alias("size_matched"),
+        polars.col("orders").struct.field("sr").alias("size_remaining"),
+        polars.col("orders").struct.field("sl").alias("size_lapsed"),
+        polars.col("orders").struct.field("sc").alias("size_cancelled"),
+        polars.col("orders").struct.field("sv").alias("size_voided"),
+        polars.col("orders").struct.field("rac").alias("regulator_authorization_code"),
+        polars.col("orders").struct.field("rc").alias("regulator_code"),
+        polars.col("orders").struct.field("rfo").alias("customer_order_reference"),
+        polars.col("orders").struct.field("rfs").alias("customer_strategy_reference"),
     ])
 
-    _updates.sink_parquet(destination / updates / "updates.parquet", mkdir = True)
-    logger.info(f"Wrote updates to {destination}")
+    _path = normalised / "orders" / f"{updates}_{partition}.parquet"
+    _updates.sink_parquet(_path, mkdir = True)
+    logger.info(f"Wrote order {updates} to {_path}")
 
 
 def main():
@@ -371,18 +518,32 @@ def main():
         description="Report on log files."
     )
     parser.add_argument(
-        "-s",
-        "--source",
+        "-r",
+        "--raw",
         required=True,
         type=str,
-        help="The source directory (the raw parquet files)."
+        help="The raw directory (contains the raw parquet files)."
     )
     parser.add_argument(
-        "-d",
-        "--destination",
+        "-n",
+        "--normalised",
         required=True,
         type=str,
-        help="The output directory."
+        help="The normalised directory to save the output."
+    )
+    parser.add_argument(
+        "-s",
+        "--schema",
+        required=True,
+        type=str,
+        help="The schema directory."
+    )
+    parser.add_argument(
+        "-p",
+        "--partition",
+        required=True,
+        type=str,
+        help="The partition used to import."
     )
     parser.add_argument(
         "-v",
@@ -396,13 +557,16 @@ def main():
 
     configure_logging(_arguments.verbose if _arguments.verbose else 0)
 
-    _source = pathlib.Path(_arguments.source)
-    _destination = pathlib.Path(_arguments.destination)
+    _raw = pathlib.Path(_arguments.raw)
+    _normalised = pathlib.Path(_arguments.normalised)
+    _schema = pathlib.Path(_arguments.schema)
+    _partition = _arguments.partition
 
-    extract_catalogues(_source, _destination)
-    extract_definitions(_source, _destination)
-    extract_postings(_source, _destination)
-    extract_updates(_source, _destination)
+    extract_catalogues(_raw, _normalised, _schema, _partition)
+    extract_definitions(_raw, _normalised, _schema, _partition)
+    extract_posts(_raw, _normalised, _schema, _partition)
+    extract_cancels(_raw, _normalised, _schema, _partition)
+    extract_updates(_raw, _normalised, _schema, _partition)
 
 if __name__ == "__main__":
     try:
