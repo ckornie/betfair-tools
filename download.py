@@ -83,7 +83,7 @@ def download_check(
     _stem, _, _ = _file.partition(r".tar.zst")
 
     for _path in directory.rglob(f"{_stem}.parquet"):
-        logger.debug(f"Ignoring {download} due to existing file {_path}")
+        logger.info(f"Ignoring {download} due to existing file {_path}")
         return False
     return True
 
@@ -169,7 +169,7 @@ def extract(
 
     for _member in tar.getmembers():
         if _member.isfile() and "application-network.json" in _member.name:
-            logger.info(f"Extracting {_member.name}")
+            logger.debug(f"Extracting {_member.name}")
             with tar.extractfile(_member) as _file, io.TextIOWrapper(_file) as _log:
                 for _line in _log:
                     if "listMarketCatalogue" in _line:
@@ -184,25 +184,33 @@ def extract(
                         _buffers["updates"].write(_line.encode('utf-8'))
 
             for _key, _value in _buffers.items():
-                _value.seek(0)
+                if _value.tell() > 0:
+                    _value.seek(0)
+  
+                    _filename, _, _ = _member.name.partition(r"/")
+                    _path = destination / _key / f"{_filename}.parquet"
 
-                _filename, _, _ = _member.name.partition(r"/")
-                _path = destination / _key / f"{_filename}.parquet"
+                    if _path.exists():
+                        logger.info(f"Ignored {_key} from {_filename} as {_path} exists")
+                    else:
+                        _path.parent.mkdir(parents=True, exist_ok=True)
 
-                if _path.exists():
-                    logger.info(f"Ignored {_key} from {_filename} as {_path} exists")
+                        try:
+                            _df = polars.read_ndjson(_value).drop("telemetry", strict=False)
+                            logger.debug(f"Schema of {_key} is {_df.schema}")
+
+                            _df.write_parquet(_path)
+
+                            logger.debug(f"Wrote {_key} from {_filename} to {_path}")
+                        except Exception as _exception:
+                            logger.warning(f"Did not write {_key} from {_filename} to {_path} due to {_exception}")
+                            _path = destination / "investigate"
+                            with tempfile.NamedTemporaryFile(prefix=f"{_key}-", mode="w+b", dir=_path, delete=False) as _investigate:
+                                logger.info(f"Wrote file out to {_investigate.name}")
+                                _investigate.write(_value.getbuffer())
                 else:
-                    _path.parent.mkdir(parents=True, exist_ok=True)
-
-                    try:
-                        _df = polars.read_ndjson(_value).drop("telemetry", strict=False)
-                        logger.debug(f"Schema of {_key} is {_df.schema}")
-
-                        _df.write_parquet(_path)
-
-                        logger.info(f"Wrote {_key} from {_filename} to {_path}")
-                    except Exception as _exception:
-                        logger.warning(f"Ignored {_key} from {_filename} due to {_exception}")
+                    logger.info(f"No data for {_key} from {_filename}")
+                _value.close()
 
 
 
