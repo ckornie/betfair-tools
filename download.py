@@ -183,11 +183,12 @@ def extract(
                     elif r'\"op\":\"ocm\"' in _line:
                         _buffers["updates"].write(_line.encode('utf-8'))
 
+            _filename, _, _ = _member.name.partition(r"/")
+
             for _key, _value in _buffers.items():
                 if _value.tell() > 0:
                     _value.seek(0)
   
-                    _filename, _, _ = _member.name.partition(r"/")
                     _path = destination / _key / f"{_filename}.parquet"
 
                     if _path.exists():
@@ -210,7 +211,6 @@ def extract(
                                 _investigate.write(_value.getbuffer())
                 else:
                     logger.info(f"No data for {_key} from {_filename}")
-                _value.close()
 
 
 
