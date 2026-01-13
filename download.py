@@ -168,7 +168,7 @@ def extract(
     }
 
     for _member in tar.getmembers():
-        if _member.isfile() and "application-network.json" in _member.name:
+        if _member.size > 0 and _member.isfile() and "application-network.json" in _member.name:
             logger.debug(f"Extracting {_member.name}")
             with tar.extractfile(_member) as _file, io.TextIOWrapper(_file) as _log:
                 for _line in _log:
