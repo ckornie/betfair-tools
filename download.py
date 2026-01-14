@@ -161,8 +161,8 @@ def decrypt(
     return _handle
 
 
-def check_structure(_members: List[TarInfo]) -> bool:
-    return True
+def network_logs(_members: List[TarInfo]) -> List[TarInfo]:
+    return [_member for _member in _members if _member.isfile() and _member.size > 0 and _member.name.endswith("application-network.json")]
 
 
 def extract(
@@ -178,59 +178,55 @@ def extract(
         "updates": io.BytesIO(),
     }
 
-    _members: List[TarInfo] = tar.getmembers()
+    _logs: List[TarInfo] = network_logs(tar.getmembers())
 
-    if not check_structure(_members):
+    if len(_logs) != 1:
         logger.warning(f"Invalid file structure for {name}")
         return False
 
-    for _member in _members:
-        _filename, _, _ = _member.name.partition(r"/")
+    for _log in _logs:
+        logger.debug(f"Extracting {_log.name}")
 
-        if _member.isfile() and _member.name.endswith("application-network.json"):
-            if _member.size == 0:
-                logger.warning(f"No data in {name}:{_filename}")
-                return False
+        _filename, _, _ = _log.name.partition(r"/")
 
-            logger.debug(f"Extracting {_member.name}")
-            with tar.extractfile(_member) as _file, io.TextIOWrapper(_file) as _log:
-                for _line in _log:
-                    if "listMarketCatalogue" in _line:
-                        _buffers["catalogues"].write(_line.encode('utf-8'))
-                    elif "marketDefinition" in _line:
-                        _buffers["definitions"].write(_line.encode('utf-8'))
-                    elif "placeOrders" in _line:
-                        _buffers["posts"].write(_line.encode('utf-8'))
-                    elif "cancelOrders" in _line:
-                        _buffers["cancels"].write(_line.encode('utf-8'))
-                    elif r'\"op\":\"ocm\"' in _line:
-                        _buffers["updates"].write(_line.encode('utf-8'))
+        with tar.extractfile(_log) as _file, io.TextIOWrapper(_file) as _log:
+            for _line in _log:
+                if "listMarketCatalogue" in _line:
+                    _buffers["catalogues"].write(_line.encode('utf-8'))
+                elif "marketDefinition" in _line:
+                    _buffers["definitions"].write(_line.encode('utf-8'))
+                elif "placeOrders" in _line:
+                    _buffers["posts"].write(_line.encode('utf-8'))
+                elif "cancelOrders" in _line:
+                    _buffers["cancels"].write(_line.encode('utf-8'))
+                elif r'\"op\":\"ocm\"' in _line:
+                    _buffers["updates"].write(_line.encode('utf-8'))
 
-            for _key, _value in _buffers.items():
-                if _value.tell() > 0:
-                    _value.seek(0)
-  
-                    _path = destination / _key / f"{_filename}.parquet"
+        for _key, _value in _buffers.items():
+            if _value.tell() > 0:
+                _value.seek(0)
 
-                    if _path.exists():
-                        logger.warning(f"Ignored {_key} from {name}:{_filename} as {_path} exists")
-                        return False
-                    else:
-                        _path.parent.mkdir(parents=True, exist_ok=True)
+                _path = destination / _key / f"{_filename}.parquet"
 
-                        try:
-                            _df = polars.read_ndjson(_value).drop("telemetry", strict=False)
-                            logger.debug(f"Schema of {_key} is {_df.schema}")
-
-                            _df.write_parquet(_path)
-
-                            logger.debug(f"Wrote {_key} from {name}:{_filename} to {_path}")
-                        except Exception as _exception:
-                            logger.warning(f"Did not write {_key} from {name}:{_filename} to {_path} due to {_exception}")
-                            return False
-
+                if _path.exists():
+                    logger.warning(f"Ignored {_key} from {name}:{_filename} as {_path} exists")
+                    return False
                 else:
-                    logger.info(f"No data for {_key} from {name}:{_filename}")
+                    _path.parent.mkdir(parents=True, exist_ok=True)
+
+                    try:
+                        _df = polars.read_ndjson(_value).drop("telemetry", strict=False)
+                        logger.debug(f"Schema of {_key} is {_df.schema}")
+
+                        _df.write_parquet(_path)
+
+                        logger.debug(f"Wrote {_key} from {name}:{_filename} to {_path}")
+                    except Exception as _exception:
+                        logger.warning(f"Did not write {_key} from {name}:{_filename} to {_path} due to {_exception}")
+                        return False
+
+            else:
+                logger.info(f"No data for {_key} from {name}:{_filename}")
 
     return True
 
