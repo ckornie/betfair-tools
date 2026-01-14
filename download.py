@@ -5,12 +5,15 @@ import sys
 import re
 import tempfile
 import io
+import os
 import traceback
 import configparser
+from tarfile import TarInfo
+
 import polars
 import tarfile
 
-from typing import Final, IO, Iterator, Dict
+from typing import Final, IO, Iterator, Dict, Tuple, BinaryIO, List
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -92,7 +95,7 @@ def download_all(
     bucket: str,
     pattern: str,
     destination: pathlib.Path,
-) -> Iterator[IO]:
+) -> Iterator[Tuple[str, IO]]:
     _bucket = client.get_bucket_by_name(bucket)
     for _file, _folder in _bucket.ls(latest_only=True, recursive=True):
         if download_check(destination, _file.file_name, pattern):
@@ -105,13 +108,14 @@ def download_all(
                 _download.save(_handle)
                 _handle.flush()
                 _handle.seek(0)
-                yield _handle
+                yield _file.file_name, _handle
 
 def decrypt(
+    name: str,
     data: IO,
     password: str,
     destination: pathlib.Path,
-) -> IO:
+) -> BinaryIO:
     if data.read(8) != b'Salted__':
         raise ValueError("Input data does not start with magic string")
 
@@ -147,7 +151,8 @@ def decrypt(
 
     logger.debug(f"Length of plaintext was {len(_plaintext)} with padding of {_padding}")
 
-    _handle = tempfile.NamedTemporaryFile(mode="w+b", dir=destination)
+    _path = destination / "archives" / name
+    _handle = open(_path, "w+b")
     _handle.write(_plaintext)
     _handle.flush()
     _handle.seek(0)
@@ -155,10 +160,16 @@ def decrypt(
     logger.debug(f"Wrote plaintext to {_handle.name}")
     return _handle
 
+
+def check_structure(_members: List[TarInfo]) -> bool:
+    return True
+
+
 def extract(
+    name: str,
     tar: tarfile.TarFile,
     destination: pathlib.Path,
-) -> None:
+) -> bool:
     _buffers: Dict[str, IO] = {
         "catalogues": io.BytesIO(),
         "definitions": io.BytesIO(),
@@ -167,8 +178,20 @@ def extract(
         "updates": io.BytesIO(),
     }
 
-    for _member in tar.getmembers():
-        if _member.size > 0 and _member.isfile() and _member.name.endswith("application-network.json"):
+    _members: List[TarInfo] = tar.getmembers()
+
+    if not check_structure(_members):
+        logger.warning(f"Invalid file structure for {name}")
+        return False
+
+    for _member in _members:
+        _filename, _, _ = _member.name.partition(r"/")
+
+        if _member.isfile() and _member.name.endswith("application-network.json"):
+            if _member.size == 0:
+                logger.warning(f"No data in {name}:{_filename}")
+                return False
+
             logger.debug(f"Extracting {_member.name}")
             with tar.extractfile(_member) as _file, io.TextIOWrapper(_file) as _log:
                 for _line in _log:
@@ -183,8 +206,6 @@ def extract(
                     elif r'\"op\":\"ocm\"' in _line:
                         _buffers["updates"].write(_line.encode('utf-8'))
 
-            _filename, _, _ = _member.name.partition(r"/")
-
             for _key, _value in _buffers.items():
                 if _value.tell() > 0:
                     _value.seek(0)
@@ -192,7 +213,8 @@ def extract(
                     _path = destination / _key / f"{_filename}.parquet"
 
                     if _path.exists():
-                        logger.info(f"Ignored {_key} from {_filename} as {_path} exists")
+                        logger.warning(f"Ignored {_key} from {name}:{_filename} as {_path} exists")
+                        return False
                     else:
                         _path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -202,17 +224,15 @@ def extract(
 
                             _df.write_parquet(_path)
 
-                            logger.debug(f"Wrote {_key} from {_filename} to {_path}")
+                            logger.debug(f"Wrote {_key} from {name}:{_filename} to {_path}")
                         except Exception as _exception:
-                            logger.warning(f"Did not write {_key} from {_filename} to {_path} due to {_exception}")
-                            _path = destination / "investigate"
-                            with tempfile.NamedTemporaryFile(prefix=f"{_key}-", mode="w+b", dir=_path, delete=False) as _investigate:
-                                logger.info(f"Wrote file out to {_investigate.name}")
-                                _investigate.write(_value.getbuffer())
+                            logger.warning(f"Did not write {_key} from {name}:{_filename} to {_path} due to {_exception}")
+                            return False
+
                 else:
-                    logger.info(f"No data for {_key} from {_filename}")
+                    logger.info(f"No data for {_key} from {name}:{_filename}")
 
-
+    return True
 
 def main():
     """Parses command-line arguments and runs the main logic."""
@@ -265,10 +285,16 @@ def main():
         _configuration["archiving"]["backblaze_key"],
     )
 
-    for _archive in download_all(_client, _bucket, _pattern, _destination):
-        with decrypt(_archive, _password, _destination) as _zstd, tarfile.open(fileobj=_zstd, mode='r:zst') as _tar:
-            extract(_tar, _destination)
-
+    for (_name, _archive) in download_all(_client, _bucket, _pattern, _destination):
+        _zstd: IO = decrypt(_name, _archive, _password, _destination)
+        with tarfile.open(fileobj=_zstd, mode='r:zst') as _tar:
+            if extract(_name, _tar, _destination):
+                _zstd.close()
+                logger.debug(f"Deleted {_zstd.name} after extraction")
+                os.remove(_zstd.name)
+            else:
+                logger.warning(f"Saved {_zstd.name} for inspection")
+                _zstd.close()
 
 if __name__ == "__main__":
     try:
