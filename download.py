@@ -108,7 +108,9 @@ def download_all(
                 _download.save(_handle)
                 _handle.flush()
                 _handle.seek(0)
-                yield _file.file_name, _handle
+
+                (_, _, _name) = _file.file_name.partition("/")
+                yield _name, _handle
 
 def decrypt(
     name: str,
