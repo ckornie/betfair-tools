@@ -260,6 +260,13 @@ def main():
         help="The destination directory (also used for interim files)."
     )
     parser.add_argument(
+        "-k",
+        "--keep",
+        required=False,
+        action="store_true",
+        help="Keep the downloaded archives."
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         required=False,
@@ -275,6 +282,7 @@ def main():
     _password = _configuration["archiving"]["archive_key"]
     _bucket = _configuration["archiving"]["backblaze_bucket"]
     _pattern = _arguments.pattern
+    _keep = _arguments.keep
     _destination = pathlib.Path(_arguments.destination)
     _destination.mkdir(parents=True, exist_ok=True)
 
@@ -286,13 +294,13 @@ def main():
     for (_name, _archive) in download_all(_client, _bucket, _pattern, _destination):
         _zstd: IO = decrypt(_name, _archive, _password, _destination)
         with tarfile.open(fileobj=_zstd, mode='r:zst') as _tar:
-            if extract(_name, _tar, _destination):
+            if extract(_name, _tar, _destination) and not _keep:
                 _zstd.close()
-                logger.debug(f"Deleted {_zstd.name} after extraction")
                 os.remove(_zstd.name)
+                logger.debug(f"Deleted {_zstd.name} after extraction")
             else:
-                logger.warning(f"Saved {_zstd.name} for inspection")
                 _zstd.close()
+                logger.info(f"Saved {_zstd.name} for inspection")
 
 if __name__ == "__main__":
     try:
