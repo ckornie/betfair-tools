@@ -164,7 +164,7 @@ def decrypt(
 
 
 def network_logs(_members: List[TarInfo]) -> List[TarInfo]:
-    return [_member for _member in _members if _member.isfile() and _member.size > 0 and _member.name.endswith("application-network.json")]
+    return [_member for _member in _members if _member.isfile() and _member.size > 0 and "application-network.json" in _member.name]
 
 
 def extract(
