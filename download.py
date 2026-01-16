@@ -232,10 +232,36 @@ def extract(
 
     return True
 
+
+def process(
+    name: str,
+    archive: IO,
+    password: str,
+    destination: pathlib.Path,
+    keep: bool,
+) -> None:
+    _zstd: IO = decrypt(name, archive, password, destination)
+    with tarfile.open(fileobj=_zstd, mode='r:zst') as _tar:
+        if extract(name, _tar, destination) and not keep:
+            _zstd.close()
+            os.remove(_zstd.name)
+            logger.debug(f"Deleted {_zstd.name} after extraction")
+        else:
+            _zstd.close()
+            logger.info(f"Saved {_zstd.name} for inspection")
+
+
 def main():
     """Parses command-line arguments and runs the main logic."""
     parser = argparse.ArgumentParser(
         description="Parse log files."
+    )
+    parser.add_argument(
+        "-f",
+        "--file",
+        required=False,
+        type=str,
+        help="Read directly from a file."
     )
     parser.add_argument(
         "-c",
@@ -283,24 +309,22 @@ def main():
     _bucket = _configuration["archiving"]["backblaze_bucket"]
     _pattern = _arguments.pattern
     _keep = _arguments.keep
+
     _destination = pathlib.Path(_arguments.destination)
     _destination.mkdir(parents=True, exist_ok=True)
 
-    _client = backblaze(
-        _configuration["archiving"]["backblaze_key_id"],
-        _configuration["archiving"]["backblaze_key"],
-    )
+    if _arguments.file is not None:
+        _file = pathlib.Path(_arguments.file)
+        with _file.open(mode="rb") as _archive:
+            process(_file.name, _archive, _password, _destination, _keep)
+    else:
+        _client = backblaze(
+            _configuration["archiving"]["backblaze_key_id"],
+            _configuration["archiving"]["backblaze_key"],
+        )
 
-    for (_name, _archive) in download_all(_client, _bucket, _pattern, _destination):
-        _zstd: IO = decrypt(_name, _archive, _password, _destination)
-        with tarfile.open(fileobj=_zstd, mode='r:zst') as _tar:
-            if extract(_name, _tar, _destination) and not _keep:
-                _zstd.close()
-                os.remove(_zstd.name)
-                logger.debug(f"Deleted {_zstd.name} after extraction")
-            else:
-                _zstd.close()
-                logger.info(f"Saved {_zstd.name} for inspection")
+        for (_name, _archive) in download_all(_client, _bucket, _pattern, _destination):
+            process(_name, _archive, _password, _destination, _keep)
 
 if __name__ == "__main__":
     try:
