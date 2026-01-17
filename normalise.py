@@ -59,7 +59,10 @@ def extract_catalogues(
         _path,
         glob=True,
         include_file_paths="path",
-        cast_options=polars.ScanCastOptions(extra_struct_fields="ignore"),
+        cast_options=polars.ScanCastOptions(
+            missing_struct_fields="insert",
+            extra_struct_fields="ignore",
+        ),
     )
 
     _catalogues = _catalogues.filter(polars.col("response").struct.field("error").str.len_chars() == 0).select([
@@ -187,7 +190,10 @@ def extract_posts(
         _path,
         glob=True,
         include_file_paths="path",
-        cast_options=polars.ScanCastOptions(extra_struct_fields="ignore"),
+        cast_options=polars.ScanCastOptions(
+            missing_struct_fields="insert",
+            extra_struct_fields="ignore",
+        ),
     )
 
     # There is a missing field, 'customerStrategyRef', which we would need to get from the request.
@@ -258,7 +264,10 @@ def extract_cancels(
         _path,
         glob=True,
         include_file_paths="path",
-        cast_options=polars.ScanCastOptions(extra_struct_fields="ignore"),
+        cast_options=polars.ScanCastOptions(
+            missing_struct_fields="insert",
+            extra_struct_fields="ignore",
+        ),
     )
 
     _cancels = _cancels.filter(polars.col("response").struct.field("error").str.len_chars() == 0).select([
@@ -318,7 +327,10 @@ def extract_definitions(
         _path,
         glob=True,
         include_file_paths="path",
-        cast_options=polars.ScanCastOptions(extra_struct_fields="ignore"),
+        cast_options=polars.ScanCastOptions(
+            missing_struct_fields="insert",
+            extra_struct_fields="ignore",
+        ),
     )
 
     _definitions = _definitions.select([
@@ -439,7 +451,10 @@ def extract_updates(
         _path,
         glob=True,
         include_file_paths="path",
-        cast_options=polars.ScanCastOptions(extra_struct_fields="ignore"),
+        cast_options=polars.ScanCastOptions(
+            missing_struct_fields="insert",
+            extra_struct_fields="ignore",
+        ),
     )
 
     _updates = _updates.select([
